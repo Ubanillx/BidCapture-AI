@@ -17,7 +17,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}   BidMonitor 一键部署脚本 v1.7${NC}"
+echo -e "${GREEN}   BidMonitor 一键部署脚本 v1.8${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -52,6 +52,10 @@ fi
 if [ -d "src" ]; then
     mv src src.bak.$(date +%Y%m%d_%H%M%S)
     echo "  已备份旧的 src 目录"
+fi
+if [ -d "frontend" ]; then
+    mv frontend frontend.bak.$(date +%Y%m%d_%H%M%S)
+    echo "  已备份旧的 frontend 目录"
 fi
 
 # 解压

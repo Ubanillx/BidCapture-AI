@@ -39,9 +39,19 @@ source venv/bin/activate
 在本地 Windows 电脑上执行：
 
 ```powershell
+# 先构建前端
+cd G:\BidMonitor\frontend
+npm install
+npm run typecheck
+npm run build
+
 # 打包代码
 cd G:\BidMonitor
-Compress-Archive -Path src,server,data -DestinationPath bidmonitor_deploy.zip -Force
+Remove-Item build_temp -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force build_temp\frontend | Out-Null
+Copy-Item src,server -Destination build_temp -Recurse
+Copy-Item frontend\dist -Destination build_temp\frontend -Recurse
+Compress-Archive -Path build_temp\* -DestinationPath bidmonitor_deploy.zip -Force
 
 # 上传到服务器（替换 YOUR_SERVER_IP 为实际IP）
 scp bidmonitor_deploy.zip root@YOUR_SERVER_IP:/opt/bidmonitor/
@@ -141,7 +151,7 @@ sudo firewall-cmd --reload
 
 ## 七、访问地址
 
-手机浏览器打开：
+浏览器打开：
 ```
 http://YOUR_SERVER_IP:8080
 ```

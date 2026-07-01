@@ -23,13 +23,14 @@ class KeywordMatcher:
         初始化匹配器
         
         Args:
-            include_keywords: 包含关键字列表（OR关系，匹配任一即可）
+            include_keywords: 包含关键字列表（OR关系，匹配任一即可；为空时不做业务词筛选）
             exclude_keywords: 排除关键字列表（匹配任一则排除）
-            must_contain_keywords: 必须包含关键字列表（AND关系，必须匹配至少一个）
+            must_contain_keywords: 必须包含关键字列表（必须匹配至少一个；空业务词模式下忽略）
         """
-        self.include_keywords = [kw.lower() for kw in include_keywords]
+        self.include_keywords = [kw.lower() for kw in (include_keywords or [])]
         self.exclude_keywords = [kw.lower() for kw in (exclude_keywords or [])]
         self.must_contain_keywords = [kw.lower() for kw in (must_contain_keywords or [])]
+        self.match_all = len(self.include_keywords) == 0
     
     def match(self, text: str) -> MatchResult:
         """
@@ -37,8 +38,9 @@ class KeywordMatcher:
         
         匹配逻辑：
         1. 如果包含任一排除关键字 → 不匹配
-        2. 如果设置了must_contain，必须包含其中至少一个 → 否则不匹配
-        3. 如果包含任一include关键字 → 匹配
+        2. 如果include为空 → 不做业务词筛选
+        3. 如果设置了must_contain，必须包含其中至少一个 → 否则不匹配
+        4. 如果包含任一include关键字 → 匹配
         
         Args:
             text: 待匹配文本
@@ -46,9 +48,7 @@ class KeywordMatcher:
         Returns:
             MatchResult 对象
         """
-        if not text:
-            return MatchResult(matched=False, matched_keywords=[])
-        
+        text = text or ""
         text_lower = text.lower()
         
         # 1. 检查排除关键字
@@ -59,6 +59,12 @@ class KeywordMatcher:
                     matched_keywords=[], 
                     excluded_by=kw
                 )
+
+        if self.match_all:
+            return MatchResult(matched=True, matched_keywords=[])
+
+        if not text:
+            return MatchResult(matched=False, matched_keywords=[])
         
         # 2. 检查必须包含关键字（AND组）
         if self.must_contain_keywords:
@@ -99,11 +105,14 @@ class KeywordMatcher:
         """
         all_matched_keywords = []
         excluded_by = None
+        matched = False
         
         for text in texts:
             result = self.match(text)
             if result.excluded_by:
                 excluded_by = result.excluded_by
+            if result.matched:
+                matched = True
             all_matched_keywords.extend(result.matched_keywords)
         
         # 去重
@@ -118,7 +127,7 @@ class KeywordMatcher:
             )
         
         return MatchResult(
-            matched=len(all_matched_keywords) > 0,
+            matched=matched,
             matched_keywords=all_matched_keywords
         )
 

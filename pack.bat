@@ -2,18 +2,44 @@
 chcp 65001 >nul
 
 echo ========================================
-echo   BidMonitor 一键打包部署脚本 v1.7
+echo   BidMonitor 一键打包部署脚本 v1.8
 echo ========================================
 echo.
 
 cd /d %~dp0
 
-echo [1/4] 清理旧的打包文件...
+echo [1/5] 清理旧的打包文件...
 if exist bidmonitor_deploy.zip del bidmonitor_deploy.zip
+if exist build_temp rmdir /s /q build_temp
 
-echo [2/4] 创建部署包...
-:: 打包src和server目录（包含源码）
-powershell -Command "Compress-Archive -Path 'src', 'server' -DestinationPath 'bidmonitor_deploy.zip' -Force"
+echo [2/5] 构建前端...
+pushd frontend
+call npm install
+if errorlevel 1 (
+    popd
+    echo 前端依赖安装失败！
+    pause
+    exit /b 1
+)
+call npm run typecheck
+if errorlevel 1 (
+    popd
+    echo 前端类型检查失败！
+    pause
+    exit /b 1
+)
+call npm run build
+if errorlevel 1 (
+    popd
+    echo 前端构建失败！
+    pause
+    exit /b 1
+)
+popd
+
+echo [3/5] 创建部署包...
+:: 打包后端、核心代码和前端构建产物，不包含 frontend/node_modules
+powershell -NoProfile -Command "New-Item -ItemType Directory -Force build_temp | Out-Null; Copy-Item src,server -Destination build_temp -Recurse; New-Item -ItemType Directory -Force build_temp/frontend | Out-Null; Copy-Item frontend/dist -Destination build_temp/frontend -Recurse; Copy-Item frontend/src -Destination build_temp/frontend -Recurse; Copy-Item frontend/index.html,frontend/package.json,frontend/package-lock.json,frontend/tsconfig.json,frontend/vite.config.ts -Destination build_temp/frontend; Compress-Archive -Path build_temp/* -DestinationPath bidmonitor_deploy.zip -Force"
 
 if not exist bidmonitor_deploy.zip (
     echo 打包失败！
@@ -21,11 +47,11 @@ if not exist bidmonitor_deploy.zip (
     exit /b 1
 )
 
-echo [3/4] 打包完成！文件大小:
+echo [4/5] 打包完成！文件大小:
 for %%A in (bidmonitor_deploy.zip) do echo   %%~zA bytes
 
 echo.
-echo [4/4] 上传到服务器...
+echo [5/5] 上传到服务器...
 echo   请修改下方配置为您的服务器信息:
 echo   SERVER_IP: 您的服务器IP地址
 echo   SERVER_PWD: 您的服务器密码

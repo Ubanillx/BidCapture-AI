@@ -51,12 +51,14 @@ def get_all_crawlers():
     """获取所有爬虫类"""
     return {
         'chinabidding': ChinaBiddingCrawler,
+        'ccgp': CCGPCrawler,
     }
 
 # 默认内置网站配置 (用于通用爬虫)
 def get_default_sites():
     """获取默认的内置网站列表"""
     return {
+        'ccgp': {'name': '中国政府采购网', 'url': 'https://www.ccgp.gov.cn/'},
         'chinabidding': {'name': '中国采购与招标网', 'url': 'http://www.chinabidding.cn/'},
         'dlzb': {'name': '中国电力招标网', 'url': 'http://www.dlzb.com/'},
         'chinabiddingcc': {'name': '中国采购招标网', 'url': 'http://www.chinabidding.cc/'},
@@ -277,6 +279,26 @@ class MonitorCore:
         """记录日志"""
         logging.info(message)
         self.log_callback(message)
+
+    def _fill_detail_html(self, crawler, bid: BidInfo) -> bool:
+        """抓取二级详情页正文 HTML 并写入 BidInfo.content。"""
+        if bid.content or not bid.url:
+            return bool(bid.content)
+
+        fetch_detail_html = getattr(crawler, 'fetch_detail_html', None)
+        if not callable(fetch_detail_html):
+            return False
+
+        try:
+            detail_html = fetch_detail_html(bid.url)
+        except Exception as e:
+            self.log(f"[WARN] Detail HTML fetch failed: {bid.title[:30]}... ({e})")
+            return False
+
+        if detail_html:
+            bid.content = detail_html
+            return True
+        return False
     
     def run_once(self, progress_callback=None, stop_event=None) -> Dict[str, Any]:
         """
@@ -333,11 +355,22 @@ class MonitorCore:
                 
                 # 匹配关键字
                 matched_count = 0
+                detail_count = 0
                 for bid in bids:
                     # 在匹配过程中也检查停止信号
                     if stop_event and stop_event.is_set():
                         self.log("检测到停止信号，中断匹配")
                         break
+
+                    already_exists = self.storage.exists(bid)
+                    existing_bid = None
+                    if already_exists and hasattr(self.storage, 'get_by_unique_id'):
+                        existing_bid = self.storage.get_by_unique_id(bid.unique_id)
+
+                    if existing_bid and existing_bid.content:
+                        bid.content = existing_bid.content
+                    elif self._fill_detail_html(crawler, bid):
+                        detail_count += 1
                     
                     result = self.matcher.match_any(bid.title, bid.content)
                     
@@ -366,12 +399,16 @@ class MonitorCore:
                                     'reason': ai_reason
                                 })
                         
-                        if not self.storage.exists(bid):
-                            self.storage.save(bid, notified=False)
+                        if already_exists:
+                            if bid.content:
+                                self.storage.update_content(bid)
+                            continue
+
+                        if self.storage.save(bid, notified=False):
                             all_matched_bids.append(bid)
                             matched_count += 1
                 
-                self.log(f"[OK] {crawler.name}: Found {len(bids)} items, {matched_count} new matches")
+                self.log(f"[OK] {crawler.name}: Found {len(bids)} items, {detail_count} detail HTML, {matched_count} new matches")
                 
             except Exception as e:
                 failed_sites.append({'name': crawler.name, 'error': str(e)})

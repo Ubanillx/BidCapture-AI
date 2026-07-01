@@ -5,18 +5,23 @@ BidMonitor 服务器端主应用
 import os
 import sys
 import json
+import csv
+import io
+import base64
 import asyncio
 import logging
 import threading
+import hashlib
+import hmac
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 import secrets
 
@@ -72,22 +77,66 @@ app_state = AppState()
 # 配置文件路径
 CONFIG_FILE = os.path.join(BASE_DIR, 'server', 'server_config.json')
 
-# HTTP Basic 认证配置
-security = HTTPBasic()
-AUTH_USERNAME = "CDKJ"
-AUTH_PASSWORD = "cdkj"
+# JWT 认证配置
+AUTH_USERNAME = "admin"
+AUTH_PASSWORD = "123456"
+JWT_SECRET = os.getenv("BIDMONITOR_JWT_SECRET", "bidcapture-ai-local-jwt-secret")
+JWT_EXPIRE_SECONDS = int(os.getenv("BIDMONITOR_JWT_EXPIRE_SECONDS", str(24 * 60 * 60)))
+JWT_ALGORITHM = "HS256"
 
-def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    """验证用户名和密码"""
-    correct_username = secrets.compare_digest(credentials.username, AUTH_USERNAME)
-    correct_password = secrets.compare_digest(credentials.password, AUTH_PASSWORD)
-    if not (correct_username and correct_password):
-        raise HTTPException(
-            status_code=401,
-            detail="用户名或密码错误",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+def _base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+def _base64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(f"{data}{padding}")
+
+def create_access_token(username: str) -> str:
+    """创建 HS256 JWT access token。"""
+    now = int(time.time())
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    payload = {
+        "sub": username,
+        "iat": now,
+        "exp": now + JWT_EXPIRE_SECONDS,
+    }
+    signing_input = ".".join([
+        _base64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+        _base64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+    ])
+    signature = hmac.new(
+        JWT_SECRET.encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{signing_input}.{_base64url_encode(signature)}"
+
+def verify_access_token(token: str) -> Dict[str, Any]:
+    """校验 HS256 JWT access token。"""
+    try:
+        header_segment, payload_segment, signature_segment = token.split(".")
+        signing_input = f"{header_segment}.{payload_segment}"
+        expected_signature = hmac.new(
+            JWT_SECRET.encode("utf-8"),
+            signing_input.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        actual_signature = _base64url_decode(signature_segment)
+        if not hmac.compare_digest(expected_signature, actual_signature):
+            raise ValueError("bad signature")
+
+        header = json.loads(_base64url_decode(header_segment).decode("utf-8"))
+        if header.get("alg") != JWT_ALGORITHM:
+            raise ValueError("bad algorithm")
+
+        payload = json.loads(_base64url_decode(payload_segment).decode("utf-8"))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            raise ValueError("token expired")
+        if payload.get("sub") != AUTH_USERNAME:
+            raise ValueError("bad subject")
+        return payload
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="登录已过期，请重新登录") from exc
 
 def load_config() -> Dict[str, Any]:
     """加载配置"""
@@ -97,6 +146,7 @@ def load_config() -> Dict[str, Any]:
         'must_contain': '无人机',
         'interval': 10,
         'enabled_sites': [
+            'ccgp',
             'chinabidding', 'dlzb', 'chinabiddingcc', 'gdtzb', 'cpeinet', 'espic',
             'chng', 'powerchina', 'powerchina_bid', 'powerchina_ec', 'powerchina_scm',
             'powerchina_idx', 'powerchina_nw', 'ceec', 'chdtp', 'chec_gys', 'chinazbcg',
@@ -171,6 +221,16 @@ class ConfigModel(BaseModel):
     wechat_enabled: Optional[bool] = None
     ai_enabled: Optional[bool] = None
     use_selenium: Optional[bool] = None  # Selenium浏览器模式开关
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    username: str
 
 class StatusResponse(BaseModel):
     is_running: bool
@@ -427,48 +487,78 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 添加CORS中间件，允许前端跨域访问
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "BIDMONITOR_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174",
+    ).split(",")
+    if origin.strip()
+]
+
+# 添加CORS中间件，允许独立前端开发服务访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有来源
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],  # 允许所有HTTP方法
-    allow_headers=["*"],  # 允许所有请求头
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# HTTP Basic 认证中间件
-import base64
+# JWT 认证中间件
 from starlette.middleware.base import BaseHTTPMiddleware
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
-    """HTTP Basic 认证中间件"""
+class JwtAuthMiddleware(BaseHTTPMiddleware):
+    """Bearer JWT 认证中间件"""
+
+    public_paths = {
+        "/",
+        "/favicon.ico",
+        "/favicon.svg",
+        "/api/auth/login",
+    }
+
     async def dispatch(self, request: Request, call_next):
-        # 检查Authorization头
-        auth_header = request.headers.get("Authorization")
-        
-        if auth_header:
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        path = request.url.path
+        if (
+            path in self.public_paths
+            or path.startswith("/assets/")
+            or path.startswith("/static/")
+        ):
+            return await call_next(request)
+
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        scheme, _, token = auth_header.partition(" ")
+        if scheme.lower() == "bearer" and token:
             try:
-                scheme, credentials = auth_header.split()
-                if scheme.lower() == "basic":
-                    decoded = base64.b64decode(credentials).decode("utf-8")
-                    username, password = decoded.split(":", 1)
-                    if username == AUTH_USERNAME and password == AUTH_PASSWORD:
-                        return await call_next(request)
-            except Exception:
+                request.state.user = verify_access_token(token)
+                return await call_next(request)
+            except HTTPException:
                 pass
-        
-        # 认证失败，返回401
+
         return Response(
-            content="认证失败，请输入正确的用户名和密码",
+            content=json.dumps({"detail": "未登录或登录已过期"}, ensure_ascii=False),
             status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="BidMonitor"'},
-            media_type="text/plain"
+            headers={"WWW-Authenticate": "Bearer"},
+            media_type="application/json",
         )
 
-app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(JwtAuthMiddleware)
 
 # 静态文件
 STATIC_DIR = os.path.join(os.path.dirname(__file__), 'static')
+FRONTEND_DIST_DIR = os.path.join(BASE_DIR, 'frontend', 'dist')
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, 'assets')
+
+if os.path.exists(FRONTEND_ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="frontend-assets")
+
 if os.path.exists(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -477,10 +567,37 @@ if os.path.exists(STATIC_DIR):
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """返回主页"""
+    frontend_index_path = os.path.join(FRONTEND_DIST_DIR, 'index.html')
+    if os.path.exists(frontend_index_path):
+        return FileResponse(frontend_index_path)
+
     index_path = os.path.join(STATIC_DIR, 'index.html')
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return HTMLResponse("<h1>BidMonitor 服务正在运行</h1><p>请访问 /static/index.html</p>")
+    return HTMLResponse("<h1>BidMonitor 服务正在运行</h1><p>请先构建 frontend 前端应用</p>")
+
+@app.get("/favicon.svg")
+@app.get("/favicon.ico")
+async def favicon():
+    """返回前端构建产物中的站点图标"""
+    favicon_path = os.path.join(FRONTEND_DIST_DIR, 'favicon.svg')
+    if os.path.exists(favicon_path):
+        return FileResponse(favicon_path, media_type="image/svg+xml")
+    return Response(status_code=204)
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(req: LoginRequest):
+    """使用账号密码登录并签发 JWT。"""
+    username_ok = secrets.compare_digest(req.username, AUTH_USERNAME)
+    password_ok = secrets.compare_digest(req.password, AUTH_PASSWORD)
+    if not (username_ok and password_ok):
+        raise HTTPException(status_code=401, detail="账号或密码错误")
+
+    return LoginResponse(
+        access_token=create_access_token(req.username),
+        expires_in=JWT_EXPIRE_SECONDS,
+        username=req.username,
+    )
 
 @app.get("/api/status")
 async def get_status():
@@ -659,13 +776,51 @@ async def get_results(limit: int = 50, offset: int = 0):
         "limit": limit,
         "items": [
             {
+                "id": b.unique_id,
                 "title": b.title,
                 "url": b.url,
                 "source": b.source,
                 "pub_date": b.publish_date or None,
+                "has_html": bool(b.content),
+                "html_length": len(b.content or ""),
             }
             for b in bids
         ]
+    }
+
+@app.get("/api/results/export-html-csv")
+async def export_results_html_csv():
+    """导出已抓取的正文HTML，CSV仅包含单列 content_html。"""
+    all_bids = app_state.storage.get_all() if hasattr(app_state.storage, 'get_all') else []
+    output = io.StringIO()
+    output.write('\ufeff')
+    writer = csv.writer(output)
+    writer.writerow(["content_html"])
+    for bid in all_bids:
+        if bid.content:
+            writer.writerow([bid.content])
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="bid_body_html.csv"'}
+    )
+
+@app.get("/api/results/{result_id}")
+async def get_result_detail(result_id: str):
+    """获取单条结果的正文HTML，用于前端可视化预览。"""
+    if not hasattr(app_state.storage, 'get_by_unique_id'):
+        raise HTTPException(status_code=404, detail="结果不存在")
+    bid = app_state.storage.get_by_unique_id(result_id)
+    if not bid:
+        raise HTTPException(status_code=404, detail="结果不存在")
+    return {
+        "id": bid.unique_id,
+        "title": bid.title,
+        "url": bid.url,
+        "source": bid.source,
+        "pub_date": bid.publish_date or None,
+        "content_html": bid.content or "",
     }
 
 @app.get("/api/logs")
@@ -905,5 +1060,3 @@ async def test_ai():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
-
-

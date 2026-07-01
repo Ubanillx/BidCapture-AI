@@ -4,7 +4,7 @@
 from typing import List
 from urllib.parse import urljoin
 from datetime import datetime
-from .base import BaseCrawler, BidInfo
+from .base import BaseCrawler, BidInfo, is_bid_related_text
 
 class CustomCrawler(BaseCrawler):
     """自定义通用爬虫"""
@@ -37,6 +37,8 @@ class CustomCrawler(BaseCrawler):
             if not text or len(text) < 4: # 标题太短通常不是招标信息
                 continue
             if href.lower().startswith(('javascript:', '#', 'mailto:', 'tel:')):
+                continue
+            if not is_bid_related_text(text, href):
                 continue
                 
             # 补全URL

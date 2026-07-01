@@ -315,7 +315,45 @@
             font-size: 12px;
             color: var(--text-secondary);
             display: flex;
-            gap: 12px
+            gap: 12px;
+            flex-wrap: wrap
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 10px
+        }
+
+        .html-badge {
+            color: var(--success);
+            font-weight: 500
+        }
+
+        .html-badge.empty {
+            color: var(--text-secondary);
+            font-weight: 400
+        }
+
+        .html-modal-content {
+            max-width: 900px
+        }
+
+        .html-preview-frame {
+            width: 100%;
+            height: 420px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #fff
+        }
+
+        .raw-html {
+            margin-top: 12px;
+            min-height: 160px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap
         }
 
         .empty-state {
@@ -585,7 +623,10 @@
     <div id="page-results" class="page">
         <div class="container">
             <div class="card">
-                <div class="card-title">📋 最新招标信息</div>
+                <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+                    <span>📋 最新招标信息</span>
+                    <button class="btn btn-sm btn-outline" onclick="exportHtmlCsv()">导出CSV</button>
+                </div>
                 <div id="resultsList">
                     <div class="loading">加载中...</div>
                 </div>
@@ -635,7 +676,9 @@
             <div class="card">
                 <div class="card-title">🔍 搜索配置</div>
                 <div class="config-section"><label class="config-label">关注关键词（逗号分隔）</label><textarea
-                        class="config-input" id="cfgKeywords"></textarea></div>
+                        class="config-input" id="cfgKeywords"></textarea>
+                    <p class="hint">留空则不做业务关键词筛选，抓取所有招标相关二级页面</p>
+                </div>
                 <div class="config-section"><label class="config-label">排除关键词</label><textarea class="config-input"
                         id="cfgExclude"></textarea></div>
                 <div class="config-section"><label class="config-label">必须包含</label><input type="text"
@@ -809,6 +852,21 @@
             </div>
         </div>
     </div>
+    <!-- 正文HTML预览弹窗 -->
+    <div id="htmlPreviewModal" class="modal">
+        <div class="modal-content html-modal-content">
+            <div class="modal-header"><span id="htmlPreviewTitle">正文HTML</span><button class="modal-close"
+                    onclick="closeHtmlPreview()">×</button></div>
+            <div class="modal-body">
+                <iframe id="htmlPreviewFrame" class="html-preview-frame" sandbox=""></iframe>
+                <textarea id="htmlRaw" class="config-input raw-html" readonly></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" style="flex:1" onclick="closeHtmlPreview()">关闭</button>
+                <button class="btn btn-primary" style="flex:1" onclick="copyPreviewHtml()">复制HTML</button>
+            </div>
+        </div>
+    </div>
     <!-- 底部导航 -->
     <nav class="nav-tabs">
         <button class="nav-tab active" onclick="showPage('home')"><span class="nav-tab-icon">🏠</span>控制台</button>
@@ -820,6 +878,7 @@
     <script>
         const API = '';
         let currentConfig = {}, currentContacts = [], currentSites = [], currentCustomSites = [], editingContactIndex = -1;
+        let currentPreviewHtml = '';
         let nextRunTime = null, countdownInterval = null;
 
         function showPage(n) {
@@ -942,7 +1001,18 @@
                 const data = await res.json();
                 const c = document.getElementById('resultsList');
                 if (data.items && data.items.length > 0) {
-                    c.innerHTML = data.items.map(i => `<div class="result-item"><div class="result-title"><a href="${i.url}" target="_blank">${escapeHtml(i.title)}</a></div><div class="result-meta"><span>📅 ${i.pub_date || '未知'}</span><span>📍 ${escapeHtml(i.source)}</span></div></div>`).join('');
+                    c.innerHTML = data.items.map(i => {
+                        const htmlStatus = i.has_html
+                            ? `<span class="html-badge">正文HTML ${i.html_length}字符</span>`
+                            : '<span class="html-badge empty">未抓到正文HTML</span>';
+                        return `<div class="result-item">
+                            <div class="result-title"><a href="${escapeAttr(i.url)}" target="_blank">${escapeHtml(i.title)}</a></div>
+                            <div class="result-meta"><span>📅 ${i.pub_date || '未知'}</span><span>📍 ${escapeHtml(i.source)}</span>${htmlStatus}</div>
+                            <div class="result-actions">
+                                <button class="btn btn-sm btn-outline" ${i.has_html ? '' : 'disabled'} onclick="showHtmlPreview('${i.id}')">预览正文</button>
+                            </div>
+                        </div>`;
+                    }).join('');
                 } else {
                     c.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📭</div><div>暂无招标信息</div></div>';
                 }
@@ -950,6 +1020,45 @@
                 console.error(e);
                 document.getElementById('resultsList').innerHTML = '<div class="empty-state"><div class="empty-state-icon">⚠️</div><div>加载失败，请刷新重试</div></div>';
             }
+        }
+
+        async function showHtmlPreview(id) {
+            try {
+                const res = await fetch(API + '/api/results/' + encodeURIComponent(id));
+                if (!res.ok) throw new Error('加载失败');
+                const data = await res.json();
+                currentPreviewHtml = data.content_html || '';
+                document.getElementById('htmlPreviewTitle').textContent = data.title || '正文HTML';
+                document.getElementById('htmlRaw').value = currentPreviewHtml;
+                const iframe = document.getElementById('htmlPreviewFrame');
+                const base = data.url ? `<base href="${escapeAttr(data.url)}" target="_blank">` : '';
+                iframe.srcdoc = `<!doctype html><html><head><meta charset="utf-8">${base}<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;line-height:1.7;color:#111827;padding:16px}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{border:1px solid #d1d5db;padding:6px}</style></head><body>${currentPreviewHtml || '<p>暂无正文HTML</p>'}</body></html>`;
+                document.getElementById('htmlPreviewModal').classList.add('active');
+            } catch (e) {
+                alert('正文加载失败: ' + e.message);
+            }
+        }
+
+        function closeHtmlPreview() {
+            document.getElementById('htmlPreviewModal').classList.remove('active');
+            document.getElementById('htmlPreviewFrame').srcdoc = '';
+            currentPreviewHtml = '';
+        }
+
+        async function copyPreviewHtml() {
+            if (!currentPreviewHtml) return;
+            try {
+                await navigator.clipboard.writeText(currentPreviewHtml);
+                alert('HTML已复制');
+            } catch (e) {
+                document.getElementById('htmlRaw').select();
+                document.execCommand('copy');
+                alert('HTML已复制');
+            }
+        }
+
+        function exportHtmlCsv() {
+            window.location.href = API + '/api/results/export-html-csv';
         }
 
         async function loadConfig() {
@@ -1337,6 +1446,10 @@
             const d = document.createElement('div');
             d.textContent = t;
             return d.innerHTML;
+        }
+
+        function escapeAttr(t) {
+            return escapeHtml(t).replace(/"/g, '&quot;');
         }
 
         // 初始化

@@ -24,7 +24,7 @@ except Exception as e:
     SELENIUM_AVAILABLE = False
     IMPORT_ERROR_MSG = f"Unexpected error: {str(e)}"
 
-from .base import BidInfo
+from .base import BidInfo, extract_body_html, is_bid_related_text
 
 
 class SeleniumCrawler:
@@ -165,6 +165,11 @@ class SeleniumCrawler:
             return None
         
         return self.parse(html)
+
+    def fetch_detail_html(self, url: str) -> str:
+        """使用浏览器抓取二级详情页正文 HTML。"""
+        html = self.fetch(url)
+        return extract_body_html(html) if html else ""
     
     def parse(self, html: str) -> List[BidInfo]:
         """解析页面内容"""
@@ -183,6 +188,8 @@ class SeleniumCrawler:
             if not text or len(text) < 4:
                 continue
             if href.lower().startswith(('javascript:', '#', 'mailto:', 'tel:')):
+                continue
+            if not is_bid_related_text(text, href):
                 continue
             
             # 补全URL

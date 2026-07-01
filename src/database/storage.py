@@ -120,6 +120,17 @@ class Storage:
         ))
         conn.commit()
         return True
+
+    def update_content(self, bid: BidInfo) -> bool:
+        """更新已存在记录的正文 HTML。"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bids SET content = ? WHERE unique_id = ?",
+            (bid.content, bid.unique_id)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     
     def mark_notified(self, bids):
         """标记招标信息已发送通知
@@ -221,6 +232,26 @@ class Storage:
             )
             for row in rows
         ]
+
+    def get_by_unique_id(self, unique_id: str) -> Optional[BidInfo]:
+        """按唯一ID获取单条招标信息"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT title, url, publish_date, source, content, purchaser
+            FROM bids WHERE unique_id = ?
+        """, (unique_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return BidInfo(
+            title=row[0],
+            url=row[1],
+            publish_date=row[2],
+            source=row[3],
+            content=row[4],
+            purchaser=row[5]
+        )
     
     def count_all(self) -> int:
         """获取总记录数"""

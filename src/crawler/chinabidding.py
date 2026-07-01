@@ -4,7 +4,7 @@
 """
 from typing import List, Dict, Any
 from urllib.parse import urljoin
-from .base import BaseCrawler, BidInfo
+from .base import BaseCrawler, BidInfo, is_bid_related_text
 
 
 class ChinaBiddingCrawler(BaseCrawler):
@@ -42,17 +42,16 @@ class ChinaBiddingCrawler(BaseCrawler):
                 if not title or len(title) < 10:
                     continue
                 
-                # 关键字过滤
-                title_lower = title.lower()
-                keywords_lower = [kw.lower() for kw in self.search_keywords]
-                bid_keywords = ['招标', '中标', '采购', '公告']
-                
-                # 必须包含业务关键字或搜索关键字
-                has_bid_keyword = any(kw in title_lower for kw in bid_keywords)
-                has_search_keyword = any(kw in title_lower for kw in keywords_lower)
-                
-                if not (has_bid_keyword or has_search_keyword):
-                    continue
+                # 空业务关键词时仍只收招投标相关二级页，不收普通导航/资讯链接。
+                if not self.search_keywords:
+                    if not is_bid_related_text(title, item.get('href', '')):
+                        continue
+                else:
+                    title_lower = title.lower()
+                    keywords_lower = [kw.lower() for kw in self.search_keywords]
+                    has_search_keyword = any(kw in title_lower for kw in keywords_lower)
+                    if not (is_bid_related_text(title, item.get('href', '')) or has_search_keyword):
+                        continue
                 
                 url = item.get('href', '')
                 if not url or url.startswith('javascript'):

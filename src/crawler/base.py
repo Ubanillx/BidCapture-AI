@@ -32,6 +32,96 @@ USER_AGENTS = [
 ]
 
 
+CONTENT_SELECTORS = [
+    ".vF_detail_content",
+    ".vT_detail_content",
+    ".detail_content",
+    ".detail-content",
+    ".article-content",
+    ".notice-content",
+    ".news-content",
+    ".TRS_Editor",
+    "article",
+    "main",
+    "#content",
+    "#zoom",
+    "#detail",
+    ".article",
+    ".articleCon",
+    ".article_con",
+    ".content-main",
+    ".detail",
+    ".detail_con",
+    ".content",
+]
+
+
+BID_RELATED_KEYWORDS = [
+    "招标",
+    "投标",
+    "中标",
+    "采购",
+    "公告",
+    "公示",
+    "竞价",
+    "询价",
+    "磋商",
+    "谈判",
+    "成交",
+    "候选人",
+    "开标",
+    "废标",
+    "流标",
+    "招采",
+    "采购意向",
+    "更正公告",
+    "tender",
+    "bidding",
+    "bid",
+    "procurement",
+]
+
+
+def is_bid_related_text(*parts: str) -> bool:
+    """判断标题或链接是否像招投标相关页面。"""
+    text = " ".join(part or "" for part in parts).lower()
+    return any(keyword.lower() in text for keyword in BID_RELATED_KEYWORDS)
+
+
+def extract_body_html(html: str) -> str:
+    """从详情页中提取正文容器 HTML。"""
+    soup = BeautifulSoup(html, 'lxml')
+    for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+        tag.decompose()
+    for selector in ["header", "footer", "nav", "aside", "form", ".nav", ".footer", ".header", ".sidebar"]:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    for selector in CONTENT_SELECTORS:
+        candidates = []
+        for tag in soup.select(selector):
+            text = tag.get_text(" ", strip=True)
+            if len(text) >= 80:
+                candidates.append((len(text), tag))
+        if candidates:
+            content_tag = max(candidates, key=lambda item: item[0])[1]
+            return (content_tag.decode_contents() or str(content_tag)).strip()
+
+    candidates = []
+    root = soup.body or soup
+    for tag in root.find_all(["article", "main", "section", "div"]):
+        text = tag.get_text(" ", strip=True)
+        if len(text) >= 120:
+            candidates.append((len(text), tag))
+
+    if candidates:
+        content_tag = max(candidates, key=lambda item: item[0])[1]
+    else:
+        content_tag = soup.body or soup
+
+    return (content_tag.decode_contents() or str(content_tag)).strip()
+
+
 class BaseCrawler(ABC):
     """爬虫基类"""
     
@@ -131,6 +221,13 @@ class BaseCrawler(ABC):
     def parse_html(self, html: str) -> BeautifulSoup:
         """解析HTML内容"""
         return BeautifulSoup(html, 'lxml')
+
+    def fetch_detail_html(self, url: str) -> str:
+        """抓取二级详情页正文 HTML。"""
+        html = self.fetch(url)
+        if not html or self._is_blocked(html):
+            return ""
+        return extract_body_html(html)
     
     @abstractmethod
     def parse(self, html: str) -> List[BidInfo]:
@@ -186,6 +283,7 @@ class BaseCrawler(ABC):
                     continue
                 
                 try:
+                    self.current_list_url = url
                     bids = self.parse(html)
                     all_bids.extend(bids)
                     self.logger.info(f"[{self.name}] Got {len(bids)} items from {url}")
